@@ -11,7 +11,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, OneCycleLR
 
 from .config import OptionsModelConfig, OptionsTrainConfig
-from .dataset import make_options_dataloaders
+from .dataset import make_options_dataloaders, make_options_dataset
 from .model import OptionsLSTM, build_options_model
 
 
@@ -57,19 +57,22 @@ class OptionsTrainer:
 
         torch.manual_seed(train_cfg.seed)
 
-        self.model = build_options_model(model_cfg).to(self.device)
+        self.bsm_residual = bool(getattr(train_cfg, "bsm_residual", False))
+        self.model = build_options_model(model_cfg, bsm_residual=self.bsm_residual).to(self.device)
         self.loss_fn = OptionsPricingLoss()
         self.optimizer = AdamW(
             self.model.parameters(),
             lr=train_cfg.learning_rate,
             weight_decay=train_cfg.weight_decay,
         )
+        self.dataset, self.real_data = make_options_dataset(train_cfg, model_cfg, option_type)
+        self.option_type = option_type
         self.train_dl, self.val_dl, self.test_dl = make_options_dataloaders(
-            train_cfg, model_cfg, option_type=option_type
+            train_cfg, model_cfg, option_type=option_type, dataset=self.dataset
         )
         self.scheduler = CosineAnnealingLR(
             self.optimizer,
-            T_max=train_cfg.epochs - train_cfg.warmup_epochs,
+            T_max=max(1, train_cfg.epochs - train_cfg.warmup_epochs),
         )
         Path(train_cfg.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         self.best_val_loss = float("inf")
@@ -83,15 +86,19 @@ class OptionsTrainer:
             for pg in self.optimizer.param_groups:
                 pg["lr"] = lr
 
+    def _unpack(self, batch):
+        feats, labels = batch[0].to(self.device), batch[1].to(self.device)
+        bsm = batch[2].to(self.device) if len(batch) > 2 else None
+        return feats, labels, bsm
+
     def train_epoch(self) -> Dict[str, float]:
         self.model.train()
         total_loss = 0.0
         n = 0
-        for feats, labels in self.train_dl:
-            feats = feats.to(self.device)
-            labels = labels.to(self.device)
+        for batch in self.train_dl:
+            feats, labels, bsm = self._unpack(batch)
             self.optimizer.zero_grad()
-            pred, _ = self.model(feats)
+            pred, _ = self.model(feats, bsm_price=bsm)
             losses = self.loss_fn(pred, labels)
             losses["loss"].backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), self.tcfg.grad_clip)
@@ -105,10 +112,9 @@ class OptionsTrainer:
         self.model.eval()
         total_loss = 0.0
         all_pred, all_true = [], []
-        for feats, labels in loader:
-            feats = feats.to(self.device)
-            labels = labels.to(self.device)
-            pred, _ = self.model(feats)
+        for batch in loader:
+            feats, labels, bsm = self._unpack(batch)
+            pred, _ = self.model(feats, bsm_price=bsm)
             losses = self.loss_fn(pred, labels)
             total_loss += losses["loss"].item() * len(labels)
             all_pred.append(pred.squeeze(-1).cpu())
@@ -128,6 +134,11 @@ class OptionsTrainer:
             "val_loss": val_loss,
             "model_config": self.mcfg,
             "history": self.history,
+            "label_mean": self.dataset.label_mean,
+            "label_std": self.dataset.label_std,
+            "bsm_residual": self.bsm_residual,
+            "option_type": self.option_type,
+            "data_source": str(getattr(self.dataset, "source", "synthetic")),
         }, path)
 
     def run(self) -> Dict[str, list]:

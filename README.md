@@ -182,106 +182,105 @@ w*    = softmax((δ Σ_BL)⁻¹ μ_BL)
 
 ---
 
-## Data
-
-### Options Pricing Data
-
-Real market data: CSV with columns `date, S, K, T, r, sigma, price`
-
-Synthetic: Monte-Carlo GBM paths with stochastic volatility (GARCH-lite), labelled with BSM prices. Automatically used when no CSV is present.
+## Quick Start
 
 ```bash
-python run_options.py  # auto-generates 1,000 synthetic paths
+pip install -r requirements.txt
+
+# 1. Try it on synthetic demo data (no files needed)
+python run_options.py --synthetic --epochs 20
+python run_bl.py --synthetic --epochs 20
+
+# 2. Or write demo files in the real-data format and train from them
+python make_demo_data.py                      # -> data/demo/options_demo.csv, data/demo/bl_demo.csv
+python run_options.py --data data/demo/options_demo.csv --epochs 20
+python run_bl.py      --data data/demo/bl_demo.csv      --epochs 20
+
+# 3. Predict with the trained checkpoints
+python predict.py options --data data/demo/options_demo.csv --out option_prices.csv
+python predict.py bl      --data data/demo/bl_demo.csv      --out weights.csv
+
+# Tests (fast, CPU only)
+python3 -m pytest -q
 ```
 
-### Portfolio Data
-
-Real market data: CSV with columns `date, asset_0, ..., asset_{n-1}, vix, yield_spread, ...`
-
-Synthetic: Regime-switching GBM with correlated macro signals (bull/bear state machine). Automatically used when no CSV is present.
-
-```bash
-python run_bl.py  # auto-generates 200 synthetic multi-asset series
-```
+Checkpoints are written to `checkpoints/options/` and `checkpoints/bl/` (git-ignored; change with
+`--checkpoint_dir`). `--help` on any script lists every option. With no `--data`, the first
+`.csv`/`.xlsx`/`.json` file in `--data_dir` (default `data/options`, `data/bl`) is used, and if there
+is none the scripts fall back to synthetic data and say so.
 
 ---
 
-## Quick Start
+## Bring your own data
 
-### Install
+Copy a template from [`data/templates/`](data/templates/) (the rows marked `SAMPLE` are examples to
+replace), fill in your history, and pass it with `--data`. CSV, Excel (`.xlsx`, needs `openpyxl`)
+and JSON (a list of records) are accepted. Each file is checked before training; problems are
+reported with row numbers and nothing is trained on a bad file.
 
-```bash
-pip install torch torchvision numpy scipy pandas matplotlib
-```
+### Options file (`options_template.csv`)
 
-### Train Options Pricing Model
+One row per contract per day. Header names are case-insensitive and common aliases work
+(`spot`, `strike`, `tte`, `iv`, `mid`, `call/put`, ...).
 
-```bash
-# Synthetic data (no real data needed)
-python run_options.py
+| Column | Required | Meaning |
+|---|---|---|
+| `S` | yes | underlying price (> 0) |
+| `K` | yes | strike (> 0) |
+| `T` | yes | time to expiry in **years** (> 0; divide days by 365) |
+| `r` | yes | risk-free rate as a decimal (0.045, not 4.5) |
+| `price` | yes | observed option price (the training label) |
+| `sigma` | no | annualised volatility; blank cells are implied from `price` with the BSM IV solver |
+| `contract_id` | no | groups rows into contracts; windows never span two contracts |
+| `date` | no | sorts rows within a contract and drives the chronological train/val/test split |
+| `option_type` | no | `call`/`put` (or `C`/`P`); default from `--option_type` |
 
-# Real options chain CSV
-python run_options.py --data_dir /path/to/options_data --option_type call --epochs 200
+Each training sample is `--seq_len` consecutive rows of one contract; the label is the price on
+the next row. With `--bsm_residual`, the model learns the correction to the textbook BSM price of
+that row instead of the raw price (on synthetic data the labels *are* BSM prices, so the residual
+is zero there; it is meant for market data).
 
-# Available options
-python run_options.py --help
-```
+### Portfolio file (`bl_template.csv`)
 
-### Train Black-Litterman Portfolio Model
+One row per trading day, wide format.
 
-```bash
-# Synthetic data
-python run_bl.py
+| Column | Meaning |
+|---|---|
+| `date` | optional; parsed and used to sort rows (duplicates are an error) |
+| `asset_*` | one column per asset: daily returns as decimals (0.01 = 1%). Use `--assets SPY,TLT,GLD` to pick columns with other names, and `--prices` if the columns are prices — they are converted to returns |
+| everything else | macro/regime features (VIX, spreads, factor returns, ...). Use `--macro vix,credit_spread` to choose them; missing values are forward-filled |
 
-# Real returns + macro CSV
-python run_bl.py --data_dir /path/to/portfolio_data --n_assets 20 --epochs 200
+The number of assets and macro features is taken from the file, so `--n_assets` only applies to
+synthetic data. You need at least `--seq_len` + 22 rows (the target weights are built from the next
+21 days). Real data is split chronologically (latest windows held out for validation and test) so
+overlapping windows don't leak.
 
-# Available options
-python run_bl.py --help
-```
+### Synthetic data
 
-### Inference — Options Pricing
+* Options: Monte-Carlo GBM paths with a rolling realised-vol estimate, labelled with BSM prices.
+* Portfolio: regime-switching (bull/bear) correlated returns with co-moving macro signals.
 
-```python
-import torch
-from lstm_options.model import load_options_checkpoint
-from lstm_options.dataset import build_feature_vector
+---
 
-model, ckpt = load_options_checkpoint("checkpoints/options/best_options.pt")
-model.eval()
+## Inference
 
-# Build a 30-day feature window for a specific option
-features = torch.tensor([
-    build_feature_vector(S=105, K=100, T=0.25, r=0.05, sigma=0.22)
-    for _ in range(30)
-]).unsqueeze(0)  # (1, 30, 10)
-
-normalised_price = model.predict(features).item()
-
-# Inverse-transform (store label_mean/label_std from training dataset)
-price = normalised_price * label_std + label_mean
-print(f"Predicted option price: ${price:.2f}")
-```
-
-### Inference — Black-Litterman Weights
+`predict.py` (above) is the simplest route. From Python:
 
 ```python
-import torch
-import numpy as np
-from lstm_bl.model import load_bl_checkpoint
+from lstm_options.predict import predict_options
+from lstm_bl.predict import predict_bl_weights
 
-model, ckpt = load_bl_checkpoint("checkpoints/bl/best_bl.pt")
+prices = predict_options("checkpoints/options/best_options.pt", "my_options.csv")
+# columns: contract_id, date, option_type, market_price, bsm_price, lstm_price
 
-# Assemble 60-day window: (1, 60, n_assets + macro_features)
-returns_window  = torch.tensor(asset_returns[-60:]).unsqueeze(0)
-macro_window    = torch.tensor(macro_features[-60:]).unsqueeze(0)
-x = torch.cat([returns_window, macro_window], dim=-1)
-
-weights = model.predict_weights(x)[0]  # (n_assets,)
-print("Portfolio allocation:")
-for asset, w in zip(asset_names, weights):
-    print(f"  {asset}: {w*100:.1f}%")
+weights = predict_bl_weights("checkpoints/bl/best_bl.pt", "my_portfolio.csv")
+# one row per asset: asset, weight, view_Q, view_uncertainty (for the latest seq_len window)
 ```
+
+Checkpoints store what inference needs: the options checkpoint keeps `label_mean`/`label_std`
+(to turn the normalised output back into a price) and whether it was trained in residual mode;
+the BL checkpoint keeps the asset and macro column names in training order. Both loaders
+(`load_options_checkpoint`, `load_bl_checkpoint`) return the model in eval mode.
 
 ---
 
@@ -290,24 +289,28 @@ for asset, w in zip(asset_names, weights):
 ```
 LSTM_BL/
 ├── lstm_options/
-│   ├── __init__.py
 │   ├── config.py          # OptionsModelConfig, OptionsTrainConfig
 │   ├── black_scholes.py   # Analytical BSM pricer, Greeks, IV solver
-│   ├── dataset.py         # SyntheticOptionsDataset, CSVOptionsDataset
-│   ├── model.py           # OptionsLSTM with temporal attention
+│   ├── dataset.py         # load_options_table (validation), CSVOptionsDataset, SyntheticOptionsDataset
+│   ├── model.py           # OptionsLSTM with temporal attention + BSM-residual mode
+│   ├── predict.py         # predict_options: price a file with a checkpoint
 │   └── train.py           # OptionsPricingLoss, OptionsTrainer
 ├── lstm_bl/
-│   ├── __init__.py
 │   ├── config.py          # BLModelConfig, BLTrainConfig
 │   ├── black_litterman.py # Analytical BL posterior, MV weights
-│   ├── dataset.py         # SyntheticBLDataset, CSVBLDataset
+│   ├── dataset.py         # load_bl_table (validation), CSVBLDataset, SyntheticBLDataset
 │   ├── model.py           # BLPortfolioLSTM, DifferentiableBLSolver
+│   ├── predict.py         # predict_bl_weights: weights for the latest window
 │   └── train.py           # PortfolioLoss, BLTrainer
+├── data/templates/        # options_template.csv, bl_template.csv (column schema + SAMPLE rows)
 ├── tests/
-│   ├── test_options.py    # 17 unit tests — BSM, dataset, model, loss
-│   └── test_bl.py         # 17 unit tests — BL math, dataset, model, loss
+│   ├── test_options.py    # BSM, features, dataset, model, loss
+│   ├── test_bl.py         # BL math, dataset, model, loss
+│   └── test_data_io.py    # file loading/validation, residual mode, training smoke tests, predict
 ├── run_options.py         # Options training entry point
 ├── run_bl.py              # BL portfolio training entry point
+├── predict.py             # Inference CLI for both models
+├── make_demo_data.py      # Writes synthetic demo files in the real-data schema
 └── requirements.txt
 ```
 
@@ -316,23 +319,28 @@ LSTM_BL/
 ## Tests
 
 ```bash
-# Options pricing tests (17 tests)
-python tests/test_options.py
-
-# Black-Litterman tests (17 tests)
-python tests/test_bl.py
+python3 -m pytest -q      # 61 tests, ~10 s on CPU
 ```
 
 Test coverage:
 - BSM analytical correctness (put-call parity, IV round-trip)
 - Feature engineering (moneyness flags, Greek computation)
 - Synthetic data generation (shapes, action ranges)
-- Model forward pass shapes
-- Gradient flow (no NaN gradients)
-- Checkpoint save/load round-trip
+- Model forward pass shapes, gradient flow, checkpoint save/load round-trip
 - Loss function correctness
-- BL posterior math (weight simplex, PSD covariance)
-- Differentiable BL solver (batched, end-to-end differentiable)
+- BL posterior math (weight simplex, PSD covariance) and the differentiable BL solver
+- Loading your own files: CSV/xlsx/JSON, header aliases, unit and value checks with row numbers,
+  implied vol for missing sigma, per-contract windows, prices-to-returns, chronological splits
+- BSM-residual mode, 1-epoch training runs on tiny files, checkpoint metadata, `predict.py`
+
+---
+
+## Out of scope
+
+- No market-data connectors (Bloomberg, Refinitiv, broker APIs): export to CSV/xlsx and use `--data`.
+- No backtester or transaction-cost model; the BL "Sharpe" printed during training is a quick
+  per-batch proxy, not a backtest.
+- No hyperparameter search; defaults are the ones listed below.
 
 ---
 
@@ -372,7 +380,7 @@ Test coverage:
 
 **Options model — surface prediction:** Change output_dim from 1 to (n_strikes × n_maturities) to predict the full implied vol surface simultaneously.
 
-**BL model — more assets:** Increase `n_assets` and provide a returns CSV — the model architecture scales automatically.
+**BL model — more assets:** Provide a returns file with more `asset_*` columns — the model is sized from the file automatically.
 
 **BL model — ESG integration:** Add ESG scores as macro features — the cross-stream attention will learn which ESG signals drive factor exposures.
 

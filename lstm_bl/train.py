@@ -9,7 +9,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from .config import BLModelConfig, BLTrainConfig
-from .dataset import make_bl_dataloaders
+from .dataset import make_bl_dataloaders, resolve_bl_data
 from .model import BLPortfolioLSTM, build_bl_model
 
 
@@ -91,6 +91,8 @@ def _sharpe(weights: torch.Tensor, returns: torch.Tensor) -> float:
 class BLTrainer:
     def __init__(self, train_cfg: BLTrainConfig, model_cfg: BLModelConfig):
         self.tcfg = train_cfg
+        # Your own data decides n_assets / macro_features; synthetic keeps model_cfg as given.
+        self.table, model_cfg = resolve_bl_data(train_cfg, model_cfg)
         self.mcfg = model_cfg
 
         if train_cfg.device == "auto":
@@ -112,10 +114,10 @@ class BLTrainer:
             lr=train_cfg.learning_rate,
             weight_decay=train_cfg.weight_decay,
         )
-        self.train_dl, self.val_dl, self.test_dl = make_bl_dataloaders(train_cfg, model_cfg)
+        self.train_dl, self.val_dl, self.test_dl = make_bl_dataloaders(train_cfg, model_cfg, table=self.table)
         self.scheduler = CosineAnnealingLR(
             self.optimizer,
-            T_max=train_cfg.epochs - train_cfg.warmup_epochs,
+            T_max=max(1, train_cfg.epochs - train_cfg.warmup_epochs),
         )
         Path(train_cfg.checkpoint_dir).mkdir(parents=True, exist_ok=True)
         self.best_val_loss = float("inf")
@@ -173,6 +175,11 @@ class BLTrainer:
             "val_loss": val_loss,
             "model_config": self.mcfg,
             "history": self.history,
+            "asset_names": self.table.asset_names if self.table is not None else
+            [f"asset_{i}" for i in range(self.mcfg.n_assets)],
+            "macro_names": self.table.macro_names if self.table is not None else
+            [f"macro_{i}" for i in range(self.mcfg.macro_features)],
+            "data_source": getattr(self.table, "source", "synthetic") if self.table is not None else "synthetic",
         }, path)
 
     def run(self) -> Dict[str, list]:
