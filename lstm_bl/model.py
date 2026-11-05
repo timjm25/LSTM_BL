@@ -327,8 +327,15 @@ def build_bl_model(cfg: Optional[BLModelConfig] = None) -> BLPortfolioLSTM:
 
 
 def load_bl_checkpoint(path: str, device: str = "cpu"):
+    """Load a checkpoint; the model comes back in eval mode (dropout off).
+
+    Checkpoints written by BLTrainer also carry ``asset_names`` / ``macro_names``
+    (the column order the model expects).
+    """
     ckpt = torch.load(path, map_location=device, weights_only=False)
     cfg = ckpt.get("model_config", BLModelConfig())
     model = build_bl_model(cfg)
     model.load_state_dict(ckpt["model_state_dict"])
+    model.to(device)
+    model.eval()
     return model, ckpt

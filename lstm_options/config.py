@@ -1,6 +1,6 @@
 """Configuration dataclasses for options pricing LSTM."""
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -31,3 +31,7 @@ class OptionsTrainConfig:
     num_workers: int = 2
     pin_memory: bool = True
     device: str = "auto"
+    data_file: Optional[str] = None   # explicit CSV/.xlsx/.json; overrides data_dir
+    synthetic: bool = False           # force the synthetic demo data
+    synthetic_paths: int = 1000       # number of GBM paths when synthetic
+    bsm_residual: bool = False        # learn the correction to the BSM price instead of the price

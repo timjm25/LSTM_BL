@@ -1,6 +1,6 @@
 """Configuration for LSTM Black-Litterman model."""
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -32,3 +32,9 @@ class BLTrainConfig:
     num_workers: int = 2
     pin_memory: bool = True
     device: str = "auto"
+    data_file: Optional[str] = None            # explicit CSV/.xlsx/.json; overrides data_dir
+    asset_cols: Optional[List[str]] = None     # default: columns starting with "asset_"
+    macro_cols: Optional[List[str]] = None     # default: every other non-date column
+    prices: bool = False                       # asset columns are prices, not returns
+    synthetic: bool = False                    # force the synthetic demo data
+    synthetic_series: int = 200                # number of simulated series when synthetic

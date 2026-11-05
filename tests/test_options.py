@@ -164,6 +164,8 @@ def test_options_checkpoint_roundtrip(tmp_path):
     loaded, ckpt = load_options_checkpoint(path)
     assert ckpt["epoch"] == 1
     x = torch.randn(1, cfg.sequence_length, cfg.input_dim)
+    model.eval()  # dropout off on both sides; the loader returns an eval-mode model
+    assert not loaded.training
     with torch.no_grad():
         out_orig, _ = model(x)
         out_load, _ = loaded(x)

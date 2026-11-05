@@ -226,6 +226,8 @@ def test_bl_checkpoint_roundtrip(tmp_path):
     loaded, ckpt = load_bl_checkpoint(path)
     assert ckpt["epoch"] == 3
     x = torch.randn(1, cfg.sequence_length, cfg.n_assets + cfg.macro_features)
+    model.eval()  # dropout off on both sides; the loader returns an eval-mode model
+    assert not loaded.training
     with torch.no_grad():
         w1, _, _ = model(x)
         w2, _, _ = loaded(x)

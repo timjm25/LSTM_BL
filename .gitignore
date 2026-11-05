@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
+
+# Model weights and training outputs
+checkpoints/
+*.pt
+*.pth
+
+# Your own / generated data — only the templates are tracked
+data/*
+!data/templates/
